@@ -176,7 +176,6 @@ run_sdm_loop <- function(gadm_sf, occurrences_df, target_species, resolution = 2
 }
 
 
-
 # Running the loop --------------------------------------------------------
 gadm_BA = read_sf("../../Vectors/AR/Buenos_Aires_Province.shp")
 
