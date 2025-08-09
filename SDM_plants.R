@@ -4,7 +4,7 @@ library(sf)
 library(terra)
 
 setwd("C:/Users/santamaria/Documents/Spatial_analysis/GBIF/Plants")
-  
+
 plants_AR_PA = read_sf("Plants_AR/Plants_ARG_PA.shp")
 
 plants_AR_oPA = read_sf("Plants_AR/Plants_ARG_outPA.shp")
@@ -33,7 +33,7 @@ length(unique(dat_all_AR[which(dat_all_AR$type== "Reserve"),]$species)) #Number 
 length(unique(dat_all_AR[which(dat_all_AR$type== "No Reserve"),]$species)) #Number of species reported outside reserves in Argentina 2677
 (2677/2900)*100 # 92.3%
 
-((2900-2677)/2900)*100 # 7.68% of plants species have been only reported inside PAs 
+((2900-2677)/2900)*100 # 7.68% of plants species have been only reported inside PAs
 
 #In total there are 2900 species reported for Buenos Aires province
 
@@ -74,108 +74,98 @@ library(maxnet)
 # target_species <- unique(dat_all_AR$species)
 
 run_sdm_loop <- function(gadm_sf, occurrences_df, target_species, resolution = 2.5, sdm_method = "maxent") {
-  
+
   for (sp in target_species) {
     message("Modeling: ", sp)
-    
+
     # 1. Filter species occurrences
-    sp_occ <- occurrences_df %>% 
-      filter(species == sp) %>% 
+    sp_occ <- occurrences_df %>%
+      filter(species == sp) %>%
       distinct(decimalLon, decimalLat, .keep_all = TRUE)
     message("Number of occurrences: ", sp, "_ ",nrow(sp_occ))
-    
-    
+
+
     library(ggplot2)
     ggplot() +
-      geom_sf(data = st_sf(geometry = st_as_sfc(gadm_BA), crs = st_crs(gadm_BA)), fill = "lightblue") +
-      geom_sf(data = sp_occ, color = "red", size = 3) +
+      geom_sf(data = gadm_sf, fill = "lightblue") +
+      geom_sf(data = st_as_sf(sp_occ, coords = c("decimalLon", "decimalLat"), crs = 4326), color = "red", size = 3) +
       ggtitle(sp)
-    
+
     if (nrow(sp_occ) < 10) {
       warning("Skipping ", sp, ": insufficient data (<10 points)")
       next
     }
-    
+
     # 2. Convert to spatial object
     sp_sf <- st_as_sf(sp_occ, coords = c("decimalLon", "decimalLat"), crs = 4326)
     crs(sp_sf)
-    
+
     gadm_sf <- st_transform(gadm_sf, crs =  crs(sp_sf))
     crs(gadm_sf)
-    
+
     study_area <- gadm_sf
     bbox <- st_bbox(study_area)
-    
+
     # 4. Download WorldClim climatic data
     env <- geodata::worldclim_global(var = "bio", res = resolution, path = tempdir())
     env_crop <- crop(env, ext(c(bbox["xmin"], bbox["xmax"], bbox["ymin"], bbox["ymax"])))
     env_masked <- mask(env_crop, vect(study_area))
-    
+
     # 5. Prepare data for modeling
     occ_coords <- st_coordinates(sp_sf)
     occ_points <- as.data.frame(occ_coords)
     colnames(occ_points) <- c("lon", "lat", "ID")
-    
-    # 6. Generate background points (pseudo-absences)
-    # set.seed(2025)
-    # bg_points <- spatSample(env_masked[[1]], size = 200, method = "random", na.rm = TRUE, as.points = TRUE)
-    # head(as.data.frame(bg_points))
-    # Transform to a projected CRS for buffering (e.g., UTM or any appropriate local CRS)
-    # For simplicity, using EPSG:3857 (Web Mercator), adjust as needed for your region
+
+    # 6. Generate background points (pseudo-absences) within 5 km buffer around occurrences
+    # Transform to a projected CRS for buffering (Web Mercator)
     sp_proj <- st_transform(sp_sf, 3857)
 
-    # Create 5 km buffer (5000 meters)
+    # Create 5 km buffer and union to a single polygon
     buffer_5km <- st_buffer(sp_proj, dist = 5000)
-
-    # Union all buffers into one polygon
     buffer_union <- st_union(buffer_5km)
 
-    # Transform buffer back to match environmental data CRS (which is likely lat/lon)
-    buffer_union_ll <- st_transform(buffer_union, crs(env_masked))
+    # Transform buffer back to geographic CRS (WGS84)
+    buffer_union_ll <- st_transform(buffer_union, 4326)
 
-    # Convert buffer to `terra` object
+    # Convert buffer to terra SpatVector and sample background points within it
     buffer_vect <- vect(buffer_union_ll)
-
-    # Sample background points within the buffer
     set.seed(2025)
-    bg_points <- spatSample(buffer_vect, size = 200, method = "random", as.points = TRUE)
-    
-    
+    bg_points <- spatSample(buffer_vect, size = 200, method = "random")
+
     bg_coords <- terra::crds(bg_points)
-    head(bg_coords)
     colnames(bg_coords) <- c("lon", "lat")
-    
+
     bg_sf <- st_as_sf(as.data.frame(bg_coords), coords = c("lon", "lat"), crs = 4326)
     occ_sf <- st_as_sf(as.data.frame(occ_coords), coords = c("X", "Y"), crs = 4326)
-    
-    
+
+
     ggplot() +
-      geom_sf(data = st_sf(geometry = st_as_sfc(gadm_BA), crs = st_crs(gadm_BA)), fill = "lightblue") +
+      geom_sf(data = gadm_sf, fill = "lightblue") +
       geom_sf(data = bg_sf, color = "black", size = 3)  +
       geom_sf(data = occ_sf, color = "red", size = 2.5) +
       ggtitle(sp)
-    
+
     # 7. Run MaxEnt model
     if (sdm_method == "maxent") {
       env_vals_occ <- extract(env_masked, occ_sf)
       env_vals_bg <- extract(env_masked, bg_sf)
-      
+
       pres <- rep(1, nrow(env_vals_occ))
       abs <- rep(0, nrow(env_vals_bg))
-      
+
       sdm_data <- rbind(env_vals_occ, env_vals_bg)
       sdm_data$presence <- c(pres, abs)
-      
+
       sdm_data <- na.omit(sdm_data)
       sdm_data = sdm_data[,-1]
-      
+
       model <- maxnet(p = sdm_data$presence, data = sdm_data[, -ncol(sdm_data)], f = maxnet.formula(p = sdm_data$presence, data = sdm_data[, -ncol(sdm_data)], classes = "default"))
-      
+
       # 8. Predict to raster
       prediction <- predict(env_masked, model, type = "cloglog", na.rm = TRUE)
-      
+
       # 9. Save output
-      out_path <- file.path("SDM_outputs2/AR", paste0(gsub("[ /]", "_", sp), "_SDM.tif"))
+      out_path <- file.path("C:/Users/santamaria/Documents/Spatial_analysis/GBIF/SDM_project/models/SDM_output_plants/AR", paste0(gsub("[ /]", "_", sp), "_SDM.tif"))
 
       dir.create(dirname(out_path), showWarnings = FALSE)
       writeRaster(prediction, out_path, overwrite = TRUE)
