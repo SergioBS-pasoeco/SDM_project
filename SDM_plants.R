@@ -193,7 +193,7 @@ run_sdm_loop(
 
 
 
-gadm_Cas = read_sf("../Vectors/CO/Casanare.shp")
+gadm_Cas = read_sf("../../Vectors/CO/Casanare.shp")
 crs(gadm_Cas)
 
 
