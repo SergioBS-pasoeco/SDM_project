@@ -69,6 +69,20 @@ library(purrr)
 library(maxnet)
 
 # Example Inputs
+
+# Load NDVI rasters at 500 m as terra SpatRaster and set layer names
+m_ndvi <- terra::rast("../SDM_project/data/raw/rasters/mean_ndvi_500m_BA.tif")
+sd_ndvi <- terra::rast("../SDM_project/data/raw/rasters/std_dev_ndvi_500m_BA.tif")
+pd = terra::vect("../../Vectors/AR/Buenos_Aires_Province_GADM.shp")
+
+# pdep = terra::vect("../../Vectors/AR/Shape_reservas_FVS_Ana/Pampa_deprimida.shp")
+
+names(m_ndvi) <- "ndvi_mean"
+names(sd_ndvi) <- "ndvi_sd"
+
+par(mfrow = c(1, 2))
+plot(m_ndvi, main = "mean");  plot(pd, add = TRUE, border = "black"); plot(sd_ndvi, main = "standard deviation"); plot(pd, add = TRUE, border = "white")
+
 # sf object with GADM polygons (gadm_sf)
 # data.frame with species occurrence: occurrences_df with species, longitude, latitude
 # target_species <- unique(dat_all_AR$species)
@@ -111,6 +125,17 @@ run_sdm_loop <- function(gadm_sf, occurrences_df, target_species, resolution = 2
     env_crop <- crop(env, ext(c(bbox["xmin"], bbox["xmax"], bbox["ymin"], bbox["ymax"])))
     env_masked <- mask(env_crop, vect(study_area))
 
+    # 4b. Prepare NDVI (500 m) and resample WorldClim to NDVI grid
+    ndvi_stack <- c(m_ndvi, sd_ndvi)
+    ndvi_crop <- crop(ndvi_stack, ext(c(bbox["xmin"], bbox["xmax"], bbox["ymin"], bbox["ymax"])))
+    ndvi_masked <- mask(ndvi_crop, vect(study_area))
+
+    # Resample climatic predictors to 500 m NDVI grid (bilinear for continuous variables)
+    env_resampled <- terra::resample(env_masked, ndvi_masked[[1]], method = "bilinear")
+
+    # Combine resampled climate layers with NDVI mean/sd
+    env_with_ndvi <- c(env_resampled, ndvi_masked)
+
     # 5. Prepare data for modeling
     occ_coords <- st_coordinates(sp_sf)
     occ_points <- as.data.frame(occ_coords)
@@ -127,10 +152,23 @@ run_sdm_loop <- function(gadm_sf, occurrences_df, target_species, resolution = 2
     # Transform buffer back to geographic CRS (WGS84)
     buffer_union_ll <- st_transform(buffer_union, 4326)
 
-    # Convert buffer to terra SpatVector and sample background points within it
+    # Convert buffer to terra SpatVector
     buffer_vect <- vect(buffer_union_ll)
+    buffer_vect <- terra::makeValid(buffer_vect)
+
+    # Background sampling: outside buffer but inside pd polygon (and study area)
+    # Ensure pd is in the same CRS as buffer/study and work with terra SpatVector objects
+    study_vect <- terra::makeValid(vect(study_area))
+    pd_aligned <- tryCatch(terra::project(pd, crs(buffer_vect)), error = function(e) pd)
+    pd_aligned <- terra::makeValid(pd_aligned)
+    pd_in_study <- terra::intersect(pd_aligned, study_vect)
+    bg_area <- terra::erase(pd_in_study, buffer_vect)
+    if (nrow(bg_area) == 0) {
+      warning("Background area empty after erasing buffer; using pd_in_study for sampling")
+      bg_area <- pd_in_study
+    }
     set.seed(2025)
-    bg_points <- spatSample(buffer_vect, size = 200, method = "random")
+    bg_points <- spatSample(bg_area, size = 200, method = "random")
 
     bg_coords <- terra::crds(bg_points)
     colnames(bg_coords) <- c("lon", "lat")
@@ -147,8 +185,8 @@ run_sdm_loop <- function(gadm_sf, occurrences_df, target_species, resolution = 2
 
     # 7. Run MaxEnt model
     if (sdm_method == "maxent") {
-      env_vals_occ <- extract(env_masked, occ_sf)
-      env_vals_bg <- extract(env_masked, bg_sf)
+      env_vals_occ <- terra::extract(env_with_ndvi, occ_sf)
+      env_vals_bg <- terra::extract(env_with_ndvi, bg_sf)
 
       pres <- rep(1, nrow(env_vals_occ))
       abs <- rep(0, nrow(env_vals_bg))
@@ -162,10 +200,17 @@ run_sdm_loop <- function(gadm_sf, occurrences_df, target_species, resolution = 2
       model <- maxnet(p = sdm_data$presence, data = sdm_data[, -ncol(sdm_data)], f = maxnet.formula(p = sdm_data$presence, data = sdm_data[, -ncol(sdm_data)], classes = "default"))
 
       # 8. Predict to raster
-      prediction <- predict(env_masked, model, type = "cloglog", na.rm = TRUE)
+      prediction <- terra::predict(env_with_ndvi, model, type = "cloglog", na.rm = TRUE)
+
+      # 8b. Quick plot to monitor progress
+      par(mfrow = c(1, 1))
+      plot(prediction, main = sp)
+      plot(vect(study_area), add = TRUE, border = "white", lwd = 1.2)
+      plot(vect(occ_sf), add = TRUE, pch = 19, cex = 0.6, col = "red")
+      plot(bg_points, add = TRUE, pch = 20, cex = 0.4, col = "white")
 
       # 9. Save output
-      out_path <- file.path("C:/Users/santamaria/Documents/Spatial_analysis/GBIF/SDM_project/models/SDM_output_plants/AR", paste0(gsub("[ /]", "_", sp), "_SDM.tif"))
+      out_path <- file.path("C:/Users/santamaria/Documents/Spatial_analysis/GBIF/SDM_project/models/SDM_output_plants/AR_test", paste0(gsub("[ /]", "_", sp), "_SDM.tif"))
 
       dir.create(dirname(out_path), showWarnings = FALSE)
       writeRaster(prediction, out_path, overwrite = TRUE)
